@@ -1,0 +1,104 @@
+# CGReplay++ 4-endpoint experiment topology (Alireza's design):
+#
+#   h0 (server) ── s1 ── s2 ── h1 (gamer)
+#                 │        │
+#                 h2       h3     (iperf hosts, one per switch)
+#              (iperf)  (iperf)
+#
+# s1, s2 are Linux routers (ip_forward) acting as the two switches. L4S DualQ
+# (dualpi2) is configured on BOTH forward egress links (s1->s2 and s2->h1), but
+# by default both run at a high, unconstrained rate. set_bottleneck.sh lowers the
+# rate on ONLY the target link per run (middle = s1->s2, lastmile = s2->h1).
+#
+# iperf placement (opposite sides of the target link):
+#   middle  (s1-s2) : client h2 -> server h3
+#   lastmile(s2-h1) : client h3 -> server on the gamer h1
+#
+# Deploy:  sudo containerlab deploy -t cgreplay4.clab.yml
+name: cgreplay4
+
+topology:
+  nodes:
+    h0:                       # CG server
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - ip addr add 10.0.1.10/24 dev eth1
+        - ip link set eth1 up
+        - ip route replace default via 10.0.1.1
+        - sh -c "ethtool -K eth1 tx off rx off gso off gro off tso off 2>/dev/null || true"
+        - sysctl -qw net.ipv4.tcp_ecn=1
+
+    h1:                       # CG gamer (+ iperf server for last-mile)
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - ip addr add 10.0.2.10/24 dev eth1
+        - ip link set eth1 up
+        - ip route replace default via 10.0.2.1
+        - sh -c "ethtool -K eth1 tx off rx off gso off gro off tso off 2>/dev/null || true"
+        - sysctl -qw net.ipv4.tcp_ecn=1
+
+    h2:                       # iperf host at s1 (middle-path client)
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - ip addr add 10.0.3.10/24 dev eth1
+        - ip link set eth1 up
+        - ip route replace default via 10.0.3.1
+        - sh -c "ethtool -K eth1 tx off rx off gso off gro off tso off 2>/dev/null || true"
+
+    h3:                       # iperf host at s2 (middle server / last-mile client)
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - ip addr add 10.0.4.10/24 dev eth1
+        - ip link set eth1 up
+        - ip route replace default via 10.0.4.1
+        - sh -c "ethtool -K eth1 tx off rx off gso off gro off tso off 2>/dev/null || true"
+
+    s1:                       # switch/router 1
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - ip addr add 10.0.1.1/24 dev eth1     # to h0 (server)
+        - ip addr add 10.0.12.1/24 dev eth2    # to s2 (middle link)
+        - ip addr add 10.0.3.1/24 dev eth3     # to h2 (iperf)
+        - ip link set eth1 up
+        - ip link set eth2 up
+        - ip link set eth3 up
+        - sysctl -qw net.ipv4.ip_forward=1
+        - ip route add 10.0.2.0/24 via 10.0.12.2   # gamer subnet via s2
+        - ip route add 10.0.4.0/24 via 10.0.12.2   # h3 subnet via s2
+        - sh -c "for i in eth1 eth2 eth3; do ethtool -K $i tx off rx off gso off gro off tso off 2>/dev/null || true; done"
+        # DualQ on the middle egress (s1->s2), unconstrained by default (1 Gbit)
+        - 'tc qdisc add dev eth2 root handle 1: htb default 10'
+        - 'tc class add dev eth2 parent 1: classid 1:10 htb rate 1000mbit ceil 1000mbit'
+        # DualQ (dualpi2) is attached post-deploy by apply_dualq.sh.
+
+    s2:                       # switch/router 2
+      kind: linux
+      image: nicolaka/netshoot:latest
+      exec:
+        - ip addr add 10.0.12.2/24 dev eth1    # to s1 (middle link)
+        - ip addr add 10.0.2.1/24 dev eth2     # to h1 (gamer, last mile)
+        - ip addr add 10.0.4.1/24 dev eth3     # to h3 (iperf)
+        - ip link set eth1 up
+        - ip link set eth2 up
+        - ip link set eth3 up
+        - sysctl -qw net.ipv4.ip_forward=1
+        - ip route add 10.0.1.0/24 via 10.0.12.1   # server subnet via s1
+        - ip route add 10.0.3.0/24 via 10.0.12.1   # h2 subnet via s1
+        - sh -c "for i in eth1 eth2 eth3; do ethtool -K $i tx off rx off gso off gro off tso off 2>/dev/null || true; done"
+        # DualQ on the last-mile egress (s2->h1), unconstrained by default (1 Gbit)
+        - 'tc qdisc add dev eth2 root handle 1: htb default 10'
+        - 'tc class add dev eth2 parent 1: classid 1:10 htb rate 1000mbit ceil 1000mbit'
+        # DualQ (dualpi2) is attached post-deploy by apply_dualq.sh, because the
+        # container tc needs sch_dualpi2 loaded on the host first (exec cannot modprobe).
+
+  links:
+    - endpoints: ["h0:eth1", "s1:eth1"]
+    - endpoints: ["s1:eth2", "s2:eth1"]
+    - endpoints: ["s2:eth2", "h1:eth1"]
+    - endpoints: ["h2:eth1", "s1:eth3"]
+    - endpoints: ["h3:eth1", "s2:eth3"]
