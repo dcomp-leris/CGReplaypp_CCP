@@ -1,0 +1,138 @@
+diff --git a/gstscream/scripts/receiver.sh b/gstscream/scripts/receiver.sh
+index 17bf1e4..011a176 100755
+--- a/gstscream/scripts/receiver.sh
++++ b/gstscream/scripts/receiver.sh
+@@ -1,29 +1,33 @@
+ #!/bin/bash
+-SCRIPT_PATH=$(realpath  $0)
+-SCRIPT_DIR=$(dirname  $SCRIPT_PATH)
+-source $SCRIPT_DIR/env.sh
++# CGReplay SCReAM receiver WITH screamrx + RTCP feedback.
++# Prints a GStreamer pipeline (ending in appsink) to stdout; cg_gamer1.py opens
++# it with cv2.VideoCapture(CAP_GSTREAMER).
++#
++# screamrx reads the incoming RTP and emits SCReAM RTCP feedback (loss/delay/ECN)
++# on its rtcp_src pad; that feedback is funneled out to the server's RTCP port so
++# screamtx can do congestion detection and rate control. rtpbin's own jitterbuffer
++# (latency=200) absorbs the netem jitter/reordering, so no separate rtpjitterbuffer.
+ 
+-QUEUE="queue max-size-buffers=2 max-size-bytes=0 max-size-time=0"
++SCRIPT_DIR=$(dirname "$(realpath "$0")")
++SCREAMLIB="$SCRIPT_DIR/../../code/wrapper_lib"
++export GST_PLUGIN_PATH="$SCRIPT_DIR/../target/debug/:${GST_PLUGIN_PATH:-}"
++export LD_LIBRARY_PATH="$SCREAMLIB:${LD_LIBRARY_PATH:-}"
+ 
+-if (($USE_SCREAM == 1)); then
+-    SCREAMRX0="! screamrx name=screamrx0 screamrx0.src "
+-    SCREAMRX0_RTCP="screamrx0.rtcp_src !  f0."
++SERVER_IP="${CGREPLAY_SERVER_IP:-10.0.0.1}"   # where screamrx feedback is sent
++RTP_PORT="${CGREPLAY_RTP_PORT:-5002}"
++RTCP_PORT="${CGREPLAY_RTCP_PORT:-5004}"
++ENCODER="${CGREPLAY_ENCODER:-h264}"
++
++if [ "$ENCODER" = "h265" ] || [ "$ENCODER" = "H.265" ] || [ "$ENCODER" = "hevc" ]; then
++    ENC_ID=265
+ else
+-    SCREAMRX0=""
+-    SCREAMRX0_RTCP=""
++    ENC_ID=264
+ fi
+ 
+-VIDEOSINK="videoconvert ! fpsdisplaysink video-sink=\"ximagesink\""
+-#VIDEOSINK="glupload ! glcolorconvert ! fpsdisplaysink video-sink=\"glimagesinkelement\""
+-#VIDEOSINK="fakesink"
+-
+-export RECVPIPELINE="rtpbin latency=10 name=r \
+-udpsrc port=$PORT0_RTP address=$RECEIVER_IP $RETRIEVE_ECN ! \
+- queue $SCREAMRX0 ! application/x-rtp, media=video, encoding-name=H${ENC_ID}, clock-rate=90000 ! r.recv_rtp_sink_0 r. ! rtph${ENC_ID}depay ! h${ENC_ID}parse ! $DECODER name=videodecoder0 ! $QUEUE ! $VIDEOSINK \
+- r.send_rtcp_src_0 ! funnel name=f0 ! queue ! udpsink host=$SENDER_IP port=$PORT0_RTCP sync=false async=false \
+- $SCREAMRX0_RTCP udpsrc port=$PORT0_RTCP ! r.recv_rtcp_sink_0 \
+-"
+-
+-export GST_DEBUG="2,screamrx:2"
+-killall -9 scream_receiver
+-$SCREAM_TARGET_DIR/scream_receiver
++echo "rtpbin latency=200 name=r \
++udpsrc port=${RTP_PORT} ! queue ! screamrx name=screamrx0 screamrx0.src ! \
++application/x-rtp,media=video,encoding-name=H${ENC_ID},clock-rate=90000,payload=96 ! r.recv_rtp_sink_0 \
++r. ! rtph${ENC_ID}depay ! avdec_h${ENC_ID} ! videoconvert ! appsink \
++r.send_rtcp_src_0 ! funnel name=f0 ! queue ! udpsink host=${SERVER_IP} port=${RTCP_PORT} sync=false async=false \
++screamrx0.rtcp_src ! f0. \
++udpsrc port=${RTCP_PORT} ! r.recv_rtcp_sink_0"
+diff --git a/gstscream/scripts/sender.sh b/gstscream/scripts/sender.sh
+index 68ae7c6..b07baa9 100755
+--- a/gstscream/scripts/sender.sh
++++ b/gstscream/scripts/sender.sh
+@@ -1,29 +1,49 @@
+ #!/bin/bash
+-SCRIPT_PATH=$(realpath  $0)
+-export SCRIPT_DIR=$(dirname  $SCRIPT_PATH)
+-source $SCRIPT_DIR/env.sh
++# CGReplay-compatible SCReAM sender WITH RTCP feedback.
++# Prints a GStreamer pipeline string to stdout; called by cg_server1.py.
++# The pipeline uses appsrc (name=source) so CGReplay can push OpenCV frames in.
++#
++# Feedback path (the whole point of SCReAM as a congestion-controlled transport):
++#   screamtx0.rtcp_sink receives the SCReAM RTCP feedback the receiver's screamrx
++#   sends back on CGREPLAY_RTCP_PORT, so screamtx can detect congestion (loss,
++#   delay, ECN/CE) and adapt the sending rate. Without this channel screamtx runs
++#   open-loop ("No RTCP feedback received") and never does real rate control.
+ 
+-INIT_ENC_BITRATE=5000
++SCRIPT_DIR=$(dirname "$(realpath "$0")")
++SCREAMLIB="$SCRIPT_DIR/../../code/wrapper_lib"
++export GST_PLUGIN_PATH="$SCRIPT_DIR/../target/debug/:${GST_PLUGIN_PATH:-}"
++export LD_LIBRARY_PATH="$SCREAMLIB:${LD_LIBRARY_PATH:-}"
+ 
+-if (($USE_SCREAM == 1)); then
+-    INIT_ENC_BITRATE=500
+-    #NOSUMMARY=" -nosummary"
+-#
+-    
+-    SCREAMTX0="queue ! screamtx name=\"screamtx0\" params=\"$NOSUMMARY -forceidr $SCREAMTX_PARAM_ECT -initrate $INIT_ENC_BITRATE  -minrate 200 -maxrate 8000\" ! queue !"
+-    SCREAMTX0_RTCP="screamtx0.rtcp_sink screamtx0.rtcp_src !"
++PLAYER_IP="${CGREPLAY_PLAYER_IP:-10.0.0.2}"
++RTP_PORT="${CGREPLAY_RTP_PORT:-5002}"
++RTCP_PORT="${CGREPLAY_RTCP_PORT:-5004}"   # player's screamrx feedback arrives here
++BIND_PORT="${CGREPLAY_BIND_PORT:-5000}"
++WIDTH="${CGREPLAY_WIDTH:-1280}"
++HEIGHT="${CGREPLAY_HEIGHT:-720}"
++FPS="${CGREPLAY_FPS:-30}"
++BITRATE="${CGREPLAY_BITRATE:-2500}"
++GOP="${CGREPLAY_GOP:-3}"
++ENCODER="${CGREPLAY_ENCODER:-h264}"
++# SCReAM rate band (kbps). maxrate gives headroom over bursty I-frame peaks.
++INITRATE="${CGREPLAY_INITRATE:-5000}"
++MINRATE="${CGREPLAY_MINRATE:-2000}"
++MAXRATE="${CGREPLAY_MAXRATE:-8000}"
++# ECN: set CGREPLAY_SCREAM_ECT=1 for the ECN scenarios (S2); default off (Not-ECT).
++if [ "${CGREPLAY_SCREAM_ECT:-0}" = "1" ]; then ECTOPT=" -ect 1"; else ECTOPT=""; fi
++
++if [ "$ENCODER" = "h265" ] || [ "$ENCODER" = "H.265" ] || [ "$ENCODER" = "hevc" ]; then
++    ENC="x265enc"; PARSE="h265parse"; PAY="rtph265pay"; ENCOPTS="option-string=\"repeat-headers=1\""
+ else
+-    SCREAMTX0=""
+-    SCREAMTX0_RTCP=""
++    ENC="x264enc"; PARSE="h264parse"; PAY="rtph264pay"; ENCOPTS=""
+ fi
+ 
+-VIDEOSRC="videotestsrc is-live=true pattern=snow ! video/x-raw,format=I420,width=1280,height=720,framerate=50/1"
+-
+-export SENDPIPELINE="rtpbin name=r \
+-$VIDEOSRC ! $ENCODER name=encoder0 bitrate=$INIT_ENC_BITRATE ! rtph${ENC_ID}pay config-interval=-1 ! $SCREAMTX0 r.send_rtp_sink_0 r.send_rtp_src_0 ! udpsink host=$RECEIVER_IP port=$PORT0_RTP sync=false $SET_ECN \
+-   udpsrc port=$PORT0_RTCP address=$SENDER_IP ! queue ! $SCREAMTX0_RTCP r.recv_rtcp_sink_0 \
+-   r.send_rtcp_src_0 ! udpsink host=$RECEIVER_IP port=$PORT0_RTCP sync=false async=false \
+-"
+-export GST_DEBUG="2,screamtx:2"
+-killall -9 scream_sender
+-$SCREAM_TARGET_DIR/scream_sender --verbose 
++echo "rtpbin name=r \
++appsrc name=source is-live=true block=true format=GST_FORMAT_TIME do-timestamp=true ! \
++videoconvert ! video/x-raw,format=I420,width=${WIDTH},height=${HEIGHT},framerate=${FPS}/1 ! \
++${ENC} name=encoder0 bitrate=${BITRATE} speed-preset=ultrafast tune=zerolatency key-int-max=${GOP} ${ENCOPTS} ! \
++${PARSE} ! ${PAY} name=pay config-interval=-1 ! \
++queue ! screamtx name=screamtx0 params=\"-initrate ${INITRATE} -minrate ${MINRATE} -maxrate ${MAXRATE}${ECTOPT}\" ! queue ! \
++r.send_rtp_sink_0 \
++r.send_rtp_src_0 ! udpsink host=${PLAYER_IP} port=${RTP_PORT} bind-port=${BIND_PORT} sync=false \
++udpsrc port=${RTCP_PORT} ! queue ! screamtx0.rtcp_sink screamtx0.rtcp_src ! r.recv_rtcp_sink_0 \
++r.send_rtcp_src_0 ! udpsink host=${PLAYER_IP} port=${RTCP_PORT} sync=false async=false"
