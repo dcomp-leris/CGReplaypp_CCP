@@ -56,7 +56,8 @@ sudo "$LABDIR/set_bottleneck.sh" "$LINK" "$B" >/dev/null 2>&1
 for n in h0 h1; do docker exec "clab-$LAB-$n" sysctl -qw net.ipv4.tcp_ecn="$ECN" 2>/dev/null; done
 
 # --- config for this run ---------------------------------------------------------
-cp "$CFG" "$CFG.clabbak"; trap 'mv "$CFG.clabbak" "$CFG" 2>/dev/null' EXIT
+cp "$CFG" "$CFG.clabbak"
+trap 'kill $SRV_PID $GAM_PID 2>/dev/null; pkill -f cg_server1.py 2>/dev/null; pkill -f cg_gamer1.py 2>/dev/null; mv "$CFG.clabbak" "$CFG" 2>/dev/null' EXIT
 sed -i "s/^    game: .*/    game: \"$GAME\"/" "$CFG"
 sed -i 's/^    server_IP: .*/    server_IP: "10.0.1.10"/' "$CFG"
 sed -i 's/^    player_IP: .*/    player_IP: "10.0.2.10"/' "$CFG"
@@ -96,9 +97,9 @@ sleep 1
 # launched from the T0 scheduler below.
 
 # --- launch transport: server (h0) then gamer (h1) -------------------------------
-nsenter -t "$H0" -n sh -c "cd $REPO/server && $SRV_ENV $SRV_PY cg_server1.py" > /tmp/${RUN_ID}_srv.log 2>&1 &
+nsenter -t "$H0" -n sh -c "cd $REPO/server && $SRV_ENV $SRV_PY cg_server1.py" > /tmp/${RUN_ID}_srv.log 2>&1 & SRV_PID=$!
 sleep 1
-nsenter -t "$H1" -n sh -c "cd $REPO/player && $GAM_ENV $GAM_PY cg_gamer1.py" > /tmp/${RUN_ID}_gam.log 2>&1 &
+nsenter -t "$H1" -n sh -c "cd $REPO/player && $GAM_ENV $GAM_PY cg_gamer1.py" > /tmp/${RUN_ID}_gam.log 2>&1 & GAM_PID=$!
 
 # --- T0 = first server video frame; schedule iperf cross-flow at T0+30 -----------
 IPLOG=/tmp/${RUN_ID}_iperf.log
@@ -114,8 +115,23 @@ if [ "$CROSS" = 1 ]; then
 fi
 
 # --- wait for the gamer to finish (hard cap in the gamer watchdog backs this up) --
-for i in $(seq 1 $((DURATION + 90))); do grep -q "RTP streaming complete" /tmp/${RUN_ID}_gam.log 2>/dev/null && break; sleep 1; done
+# Break as soon as the gamer is done: its completion line (GStreamer transports print
+# "RTP streaming complete"; the RoQ receiver prints "[SUMMARY]") or, robustly for any
+# transport, the gamer process having exited. The DURATION+90 cap is the backstop.
+for i in $(seq 1 $((DURATION + 90))); do
+  grep -qE "RTP streaming complete|\[SUMMARY\]" /tmp/${RUN_ID}_gam.log 2>/dev/null && break
+  kill -0 $GAM_PID 2>/dev/null || break
+  sleep 1
+done
 sleep 2; kill -INT $TD1 $TD2 2>/dev/null; wait $TD1 2>/dev/null; sleep 1
+
+# Stop the transport. The RoQ server (roq_main) keeps the QUIC port open after the
+# stream ends, so without this it lingers and the NEXT run's receiver connects to the
+# stale server (old code, no loop) instead of a fresh one. Kill the nsenter wrappers
+# and their python children (reparented, so a pkill by script name is the reliable part).
+kill $SRV_PID $GAM_PID 2>/dev/null
+pkill -f cg_server1.py 2>/dev/null; pkill -f cg_gamer1.py 2>/dev/null
+sleep 1
 
 n=$(ls "$REPO/player/received_frames/"*.png 2>/dev/null | wc -l)
 echo "### frames=$n ; target-pcap=$(du -h $PCAP_T 2>/dev/null|cut -f1) ; gamer-pcap=$(du -h $PCAP_G 2>/dev/null|cut -f1)"
