@@ -87,9 +87,15 @@ case "$TRANSPORT" in
 esac
 
 # --- captures (exclude the iperf port so the media pcap stays small) --------------
+# Snaplen: for the clear-RTP transports keep only the headers the merge parses (IP/UDP/RTP
+# + a few NAL bytes) and drop the video payload -> ~10x smaller pcaps and a faster merge
+# (the merge recovers the true packet size from the IP total-length field). RoQ must be
+# captured whole: its RTP rides inside the encrypted QUIC payload and tshark needs the
+# full datagram (+AEAD tag) to decrypt it. Override with SNAP=.
+case $TRANSPORT in roq) SNAP=0;; *) SNAP="${SNAP:-160}";; esac
 rm -f "$PCAP_T" "$PCAP_G"
-nsenter -t "$SNIFF_PID" -n tcpdump -i "$SNIFF_IF" -w "$PCAP_T" "udp and not port $IPERF_PORT" >/dev/null 2>&1 & TD1=$!
-[ "$SNIFF_PID" != "$GAMER_SNIFF_PID" ] && { nsenter -t "$GAMER_SNIFF_PID" -n tcpdump -i eth2 -w "$PCAP_G" "udp and not port $IPERF_PORT" >/dev/null 2>&1 & TD2=$!; } || TD2=""
+nsenter -t "$SNIFF_PID" -n tcpdump -i "$SNIFF_IF" -s "$SNAP" -w "$PCAP_T" "udp and not port $IPERF_PORT" >/dev/null 2>&1 & TD1=$!
+[ "$SNIFF_PID" != "$GAMER_SNIFF_PID" ] && { nsenter -t "$GAMER_SNIFF_PID" -n tcpdump -i eth2 -s "$SNAP" -w "$PCAP_G" "udp and not port $IPERF_PORT" >/dev/null 2>&1 & TD2=$!; } || TD2=""
 sleep 1
 
 # iperf runs via `docker exec` (the netshoot container ships iperf3; the host does

@@ -265,10 +265,27 @@ index cbf0a90..f02de0d 100644
          duration = time.perf_counter() - self._session_start
          avg_fps = self._frame_count / max(duration, 1e-6)
 diff --git a/tools/build_rtp_dataset.py b/tools/build_rtp_dataset.py
-index a9f4213..f38e9e3 100644
+index a9f4213..b085fd8 100644
 --- a/tools/build_rtp_dataset.py
 +++ b/tools/build_rtp_dataset.py
-@@ -297,8 +297,24 @@ def map_player(run, srv_frames, protocol):
+@@ -114,6 +114,16 @@ def load_packets(run, cfg, codec):
+                     r = describe_rtp(pl, codec)
+                     # video = RTP from the server's SSRC (or to the RTP port when no server log)
+                     if r is not None and r["pt"] >= 96 and (r["ssrc"] in srv_ssrcs if srv_ssrcs else dport == rtp_port):
++                        # A header-only capture (tcpdump -s) truncates pl, so describe_rtp's
++                        # pkt_len is short. ip_len is the on-wire IP total length (always in the
++                        # captured header), so recover the true RTP packet size: UDP payload =
++                        # ip_len - 20 (IP) - 8 (UDP); the testbed uses no IP options. No-op on a
++                        # full capture (true_pkt == pkt_len); the RTP header/pad overhead is intact.
++                        true_pkt = ip_len - 28
++                        if true_pkt > r["pkt_len"]:
++                            overhead = r["pkt_len"] - r["payload_len"]
++                            r["pkt_len"] = true_pkt
++                            r["payload_len"] = max(true_pkt - overhead, 0)
+                         rows.append([vp, ts, r["seq"], r["ts"], r["marker"], r["pt"], r["ssrc"],
+                                      r["pkt_len"], r["payload_len"], r["ext"], r["nal"], r["inner"],
+                                      r["fu_start"], r["fu_end"], r["slice"], r["keyframe"], "", ""])
+@@ -297,8 +307,24 @@ def map_player(run, srv_frames, protocol):
  
  
  # ============================================================================ quality
@@ -294,3 +311,40 @@ index a9f4213..f38e9e3 100644
      if img is None:
          return None
      if img.shape[1] != w or img.shape[0] != h:     # same resize the server applies
+@@ -349,11 +375,17 @@ def quality(pairs, w, h, fps, want_vmaf, want_lpips):
+         if ff is None:
+             print("  [INFO] VMAF skipped (no ffmpeg with libvmaf; set CGREPLAY_FFMPEG)")
+             return res
++        # VMAF is the slow metric (ffmpeg over the whole sequence). CGREPLAY_VMAF_STRIDE=N
++        # scores every Nth matched frame instead of all -> ~N x faster, VMAF on a 1/N sample.
++        # PSNR/SSIM stay per-frame (above). Caveat: the sampled frames are fed to libvmaf as a
++        # contiguous clip, so VMAF's temporal (motion) feature is approximate when N>1.
++        stride = max(1, int(os.environ.get("CGREPLAY_VMAF_STRIDE", 1) or 1))
++        sampled = pairs[::stride]
+         work = tempfile.mkdtemp(prefix="cg_vmaf_")
+         try:
+-            for i, (key, ref, dist) in enumerate(pairs):
+-                cv2.imwrite(os.path.join(work, f"r{i:05d}.png"), ref)
+-                cv2.imwrite(os.path.join(work, f"d{i:05d}.png"), dist)
++            for j, (key, ref, dist) in enumerate(sampled):
++                cv2.imwrite(os.path.join(work, f"r{j:05d}.png"), ref)
++                cv2.imwrite(os.path.join(work, f"d{j:05d}.png"), dist)
+             log = os.path.join(work, "vmaf.json")
+             subprocess.run([ff, "-hide_banner", "-loglevel", "error",
+                             "-framerate", str(fps), "-i", os.path.join(work, "d%05d.png"),
+@@ -363,9 +395,12 @@ def quality(pairs, w, h, fps, want_vmaf, want_lpips):
+                             "-f", "null", "-"], check=False)
+             if os.path.exists(log):
+                 for fr in json.load(open(log)).get("frames", []):
+-                    i = fr.get("frameNum", fr.get("frame"))
+-                    if i is not None and i < len(pairs):
+-                        res[pairs[i][0]]["VMAF"] = fr["metrics"].get("vmaf")
++                    j = fr.get("frameNum", fr.get("frame"))
++                    if j is not None and j < len(sampled):
++                        res[sampled[j][0]]["VMAF"] = fr["metrics"].get("vmaf")
++            if stride > 1:
++                print(f"  [INFO] VMAF sampled 1/{stride} ({len(sampled)}/{len(pairs)} frames; "
++                      f"motion feature approximate)")
+         finally:
+             shutil.rmtree(work, ignore_errors=True)
+     return res
