@@ -92,10 +92,10 @@ index fc98af9..4cd915a 100644
  
      def _finish(self):
 diff --git a/server/cg_server1.py b/server/cg_server1.py
-index c651d00..a712ae8 100755
+index c651d00..3d70d2e 100755
 --- a/server/cg_server1.py
 +++ b/server/cg_server1.py
-@@ -380,8 +380,21 @@ def stream_frames(game_name):
+@@ -380,8 +380,24 @@ def stream_frames(game_name):
      applied_bitrate = bitrate   # what the encoder is actually running at (TWCC/GCC mode)
  
      idx = 0
@@ -110,16 +110,19 @@ index c651d00..a712ae8 100755
 +    _loop_dur = float(os.environ.get("CGREPLAY_LOOP_DURATION_S", 0) or 0)
 +    _loop_t0 = time.time()
 +    while idx < len(png_files) or _loop_dur > 0:
++        if _loop_dur > 0 and (time.time() - _loop_t0) >= _loop_dur:
++            break                            # wall-clock budget spent: stops mid-dataset too,
++                                             # so a long (e.g. 9000-frame) set ends on time
 +        if idx >= len(png_files):
 +            if _loop_dur > 0 and (time.time() - _loop_t0) < _loop_dur:
-+                idx = 0                      # replay the dataset again
++                idx = 0                      # replay the dataset again (short sets)
 +            else:
 +                break
 +        #if idx == stop_frm_number: # stop after streaming 'stop_frm_number' frames!
              #break
          file = png_files[idx]  # Access the file by index
          print("Log hint==>>>",file, idx)
-@@ -396,7 +409,7 @@ def stream_frames(game_name):
+@@ -396,7 +412,7 @@ def stream_frames(game_name):
          frame_id = int(file.split('.')[0])  # Extract frame ID from the filename
          print("Debug:==>", frame_id)
  
@@ -129,7 +132,7 @@ index c651d00..a712ae8 100755
  
          if frame is None:
 diff --git a/server/roq_sender.py b/server/roq_sender.py
-index cbf0a90..9c346b7 100644
+index cbf0a90..f02de0d 100644
 --- a/server/roq_sender.py
 +++ b/server/roq_sender.py
 @@ -181,6 +181,9 @@ class RoQSenderProtocol(QuicConnectionProtocol):
@@ -166,7 +169,7 @@ index cbf0a90..9c346b7 100644
              self._seq += 1
          self.transmit()
          return n
-@@ -240,41 +245,58 @@ class RoQSenderProtocol(QuicConnectionProtocol):
+@@ -240,41 +245,60 @@ class RoQSenderProtocol(QuicConnectionProtocol):
          frames = list_frames()
          previous_time = time.perf_counter()
          pts = 0
@@ -190,6 +193,8 @@ index cbf0a90..9c346b7 100644
 +
 +        while True:
 +            for path in frames:
++                if _loop_dur > 0 and (time.time() - _loop_t0) >= _loop_dur:
++                    break                    # wall-clock budget spent mid-pass (long datasets)
 +                frame_id = int(os.path.basename(path).split(".")[0])
 +                if frame_id >= STOP_FRAME and _loop_dur <= 0:   # stop at STOP_FRAME only when NOT looping
 +                    break
@@ -259,3 +264,33 @@ index cbf0a90..9c346b7 100644
  
          duration = time.perf_counter() - self._session_start
          avg_fps = self._frame_count / max(duration, 1e-6)
+diff --git a/tools/build_rtp_dataset.py b/tools/build_rtp_dataset.py
+index a9f4213..f38e9e3 100644
+--- a/tools/build_rtp_dataset.py
++++ b/tools/build_rtp_dataset.py
+@@ -297,8 +297,24 @@ def map_player(run, srv_frames, protocol):
+ 
+ 
+ # ============================================================================ quality
++_REF_CACHE = {}
+ def reference(ref_dir, frame_id, w, h):
+-    img = cv2.imread(os.path.join(ref_dir, f"{int(frame_id):04d}.png"))
++    fid = int(frame_id)
++    # The reference files may be zero-padded to any width (0001.png for the 120-frame
++    # set, 000001.png for the 9000-frame Kaggle set). Try a few widths, then glob.
++    path = None
++    for width in (4, 6, 5, 8):
++        p = os.path.join(ref_dir, f"{fid:0{width}d}.png")
++        if os.path.exists(p):
++            path = p; break
++    if path is None:
++        hits = _REF_CACHE.get(ref_dir)
++        if hits is None:
++            hits = {int(os.path.basename(f).split(".")[0]): f
++                    for f in glob.glob(os.path.join(ref_dir, "*.png"))}
++            _REF_CACHE[ref_dir] = hits
++        path = hits.get(fid)
++    img = cv2.imread(path) if path else None
+     if img is None:
+         return None
+     if img.shape[1] != w or img.shape[0] != h:     # same resize the server applies
