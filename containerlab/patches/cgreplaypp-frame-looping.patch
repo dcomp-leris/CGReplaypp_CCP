@@ -265,7 +265,7 @@ index cbf0a90..f02de0d 100644
          duration = time.perf_counter() - self._session_start
          avg_fps = self._frame_count / max(duration, 1e-6)
 diff --git a/tools/build_rtp_dataset.py b/tools/build_rtp_dataset.py
-index a9f4213..b085fd8 100644
+index a9f4213..bc418f0 100644
 --- a/tools/build_rtp_dataset.py
 +++ b/tools/build_rtp_dataset.py
 @@ -114,6 +114,16 @@ def load_packets(run, cfg, codec):
@@ -311,40 +311,132 @@ index a9f4213..b085fd8 100644
      if img is None:
          return None
      if img.shape[1] != w or img.shape[0] != h:     # same resize the server applies
-@@ -349,11 +375,17 @@ def quality(pairs, w, h, fps, want_vmaf, want_lpips):
-         if ff is None:
-             print("  [INFO] VMAF skipped (no ffmpeg with libvmaf; set CGREPLAY_FFMPEG)")
-             return res
-+        # VMAF is the slow metric (ffmpeg over the whole sequence). CGREPLAY_VMAF_STRIDE=N
-+        # scores every Nth matched frame instead of all -> ~N x faster, VMAF on a 1/N sample.
-+        # PSNR/SSIM stay per-frame (above). Caveat: the sampled frames are fed to libvmaf as a
-+        # contiguous clip, so VMAF's temporal (motion) feature is approximate when N>1.
-+        stride = max(1, int(os.environ.get("CGREPLAY_VMAF_STRIDE", 1) or 1))
-+        sampled = pairs[::stride]
-         work = tempfile.mkdtemp(prefix="cg_vmaf_")
+@@ -326,34 +352,58 @@ def find_ffmpeg():
+     return None
+ 
+ 
+-def quality(pairs, w, h, fps, want_vmaf, want_lpips):
+-    """pairs: list of (key, ref_img, dist_img) in decode order -> {key: metrics}."""
++def quality(items, ref_dir, w, h, fps, want_vmaf, want_lpips):
++    """items: list of (key, frame_id, png_path) in decode order -> {key: metrics}.
++
++    Streams one ref/dist pair at a time (constant memory): a long run has ~1500+ frames,
++    and holding every decoded image in a list OOMs a small VM (~3 MB/image x 2 x 1500 ~ 9 GB).
++    For VMAF the sampled pairs are written to a temp dir as we go and scored in one ffmpeg
++    pass. CGREPLAY_VMAF_STRIDE=N scores every Nth matched frame (PSNR/SSIM stay per-frame);
++    the sampled frames feed libvmaf as a contiguous clip, so the temporal feature is
++    approximate when N>1."""
+     from skimage.metrics import structural_similarity
+     res = {}
+-    for key, ref, dist in pairs:
+-        g1 = cv2.cvtColor(ref, cv2.COLOR_BGR2GRAY); g2 = cv2.cvtColor(dist, cv2.COLOR_BGR2GRAY)
+-        res[key] = {"PSNR": cv2.PSNR(ref, dist), "SSIM": structural_similarity(g1, g2, data_range=255)}
+-    if want_lpips and pairs:
++    lpips_net = None
++    if want_lpips:
          try:
+             import lpips, torch
+-            net = lpips.LPIPS(net="alex", verbose=False)
+-            with torch.no_grad():
+-                for key, ref, dist in pairs:
++            lpips_net = (lpips.LPIPS(net="alex", verbose=False), torch)
++        except Exception as e:             # ImportError, or a broken torch/CUDA install
++            print(f"  [INFO] LPIPS skipped ({type(e).__name__}: {str(e)[:80]}; pip install lpips torch)")
++    ff = find_ffmpeg() if want_vmaf else None
++    if want_vmaf and ff is None:
++        print("  [INFO] VMAF skipped (no ffmpeg with libvmaf; set CGREPLAY_FFMPEG)")
++    stride = max(1, int(os.environ.get("CGREPLAY_VMAF_STRIDE", 1) or 1))
++    work = tempfile.mkdtemp(prefix="cg_vmaf_") if ff else None
++    vmaf_keys = []            # key for each temp index j written for VMAF
++    valid = 0                 # matched frames actually scored (for the stride)
++    try:
++        for key, frame_id, png in items:
++            if not png:
++                continue
++            ref = reference(ref_dir, frame_id, w, h)
++            dist = cv2.imread(png)
++            if ref is None or dist is None:
++                continue
++            if dist.shape != ref.shape:
++                dist = cv2.resize(dist, (ref.shape[1], ref.shape[0]))
++            dist = mask_qr(ref, dist)
++            g1 = cv2.cvtColor(ref, cv2.COLOR_BGR2GRAY); g2 = cv2.cvtColor(dist, cv2.COLOR_BGR2GRAY)
++            res[key] = {"PSNR": cv2.PSNR(ref, dist), "SSIM": structural_similarity(g1, g2, data_range=255)}
++            if lpips_net is not None:
++                net, torch = lpips_net
++                with torch.no_grad():
+                     t = [torch.from_numpy(cv2.cvtColor(x, cv2.COLOR_BGR2RGB)).permute(2, 0, 1)[None].float() / 127.5 - 1
+                          for x in (ref, dist)]
+                     res[key]["LPIPS"] = float(net(t[0], t[1]).item())
+-        except Exception as e:             # ImportError, or a broken torch/CUDA install
+-            print(f"  [INFO] LPIPS skipped ({type(e).__name__}: {str(e)[:80]}; pip install lpips torch)")
+-    if want_vmaf and pairs:
+-        ff = find_ffmpeg()
+-        if ff is None:
+-            print("  [INFO] VMAF skipped (no ffmpeg with libvmaf; set CGREPLAY_FFMPEG)")
+-            return res
+-        work = tempfile.mkdtemp(prefix="cg_vmaf_")
+-        try:
 -            for i, (key, ref, dist) in enumerate(pairs):
 -                cv2.imwrite(os.path.join(work, f"r{i:05d}.png"), ref)
 -                cv2.imwrite(os.path.join(work, f"d{i:05d}.png"), dist)
-+            for j, (key, ref, dist) in enumerate(sampled):
++            if work is not None and (valid % stride == 0):
++                j = len(vmaf_keys)
 +                cv2.imwrite(os.path.join(work, f"r{j:05d}.png"), ref)
 +                cv2.imwrite(os.path.join(work, f"d{j:05d}.png"), dist)
++                vmaf_keys.append(key)
++            valid += 1
++            ref = dist = g1 = g2 = None     # free before the next frame
++        if work is not None and vmaf_keys:
              log = os.path.join(work, "vmaf.json")
              subprocess.run([ff, "-hide_banner", "-loglevel", "error",
                              "-framerate", str(fps), "-i", os.path.join(work, "d%05d.png"),
-@@ -363,9 +395,12 @@ def quality(pairs, w, h, fps, want_vmaf, want_lpips):
+@@ -363,10 +413,14 @@ def quality(pairs, w, h, fps, want_vmaf, want_lpips):
                              "-f", "null", "-"], check=False)
              if os.path.exists(log):
                  for fr in json.load(open(log)).get("frames", []):
 -                    i = fr.get("frameNum", fr.get("frame"))
 -                    if i is not None and i < len(pairs):
 -                        res[pairs[i][0]]["VMAF"] = fr["metrics"].get("vmaf")
+-        finally:
 +                    j = fr.get("frameNum", fr.get("frame"))
-+                    if j is not None and j < len(sampled):
-+                        res[sampled[j][0]]["VMAF"] = fr["metrics"].get("vmaf")
++                    if j is not None and j < len(vmaf_keys):
++                        res[vmaf_keys[j]]["VMAF"] = fr["metrics"].get("vmaf")
 +            if stride > 1:
-+                print(f"  [INFO] VMAF sampled 1/{stride} ({len(sampled)}/{len(pairs)} frames; "
++                print(f"  [INFO] VMAF sampled 1/{stride} ({len(vmaf_keys)}/{valid} frames; "
 +                      f"motion feature approximate)")
-         finally:
++    finally:
++        if work is not None:
              shutil.rmtree(work, ignore_errors=True)
      return res
+ 
+@@ -439,22 +493,17 @@ def build(run, args):
+         print(f"  player: decoded={len(pf)}  mapped: " +
+               ", ".join(f"{k}={v}" for k, v in pf["map_method"].value_counts().items()))
+ 
+-        pairs = []
+-        for r in vf.dropna(subset=["player_png"]).sort_values("player_decode_idx").itertuples():
+-            if not r.player_png:
+-                continue
+-            ref = reference(ref_dir, r.frame_id, w, h); dist = cv2.imread(r.player_png)
+-            if ref is None or dist is None:
+-                continue
+-            if dist.shape != ref.shape:
+-                dist = cv2.resize(dist, (ref.shape[1], ref.shape[0]))
+-            pairs.append((int(r.instance), ref, mask_qr(ref, dist)))
+-        q = quality(pairs, w, h, fps, not args.no_vmaf, not args.no_lpips)
++        # Pass metadata only (key, frame_id, png path); quality() loads each image on the
++        # fly so a long run does not hold every decoded frame in memory at once.
++        items = [(int(r.instance), r.frame_id, r.player_png)
++                 for r in vf.dropna(subset=["player_png"]).sort_values("player_decode_idx").itertuples()
++                 if r.player_png]
++        q = quality(items, ref_dir, w, h, fps, not args.no_vmaf, not args.no_lpips)
+         for metric in ("PSNR", "SSIM", "VMAF", "LPIPS"):
+             vals = {k: v.get(metric) for k, v in q.items() if v.get(metric) is not None}
+             if vals:
+                 vf[metric] = vf["instance"].map(vals)
+-        print(f"  quality computed for {len(pairs)} frames ({', '.join(c for c in ('PSNR','SSIM','VMAF','LPIPS') if c in vf)})")
++        print(f"  quality computed for {len(q)} frames ({', '.join(c for c in ('PSNR','SSIM','VMAF','LPIPS') if c in vf)})")
+     for k in ("game", "transport", "codec", "bw_mbps", "bottleneck_mbps", "delay", "loss_pct"):
+         vf.insert(0, k, meta.get(k, ""))
+     vf.insert(0, "run_id", meta.get("run_id", os.path.basename(os.path.normpath(run))))
