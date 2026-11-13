@@ -52,8 +52,15 @@ echo "### RUN $RUN_ID | link=$LINK B=$B cross=$CROSS(C=$C) ECN=$ECN dur=${DURATI
 
 # --- bottleneck + ECN ------------------------------------------------------------
 sudo "$LABDIR/set_bottleneck.sh" "$LINK" "$B" >/dev/null 2>&1
-# ECN on the hosts (L4S needs ECT-capable endpoints); SCReAM ECT via env below.
+# ECN for S2. The tcp_ecn sysctl only covers TCP; the media is UDP (RTP/QUIC), so mark
+# the server's egress UDP as ECT(1) with nft. DualPI2 (l4s_ect) then steers it into the
+# low-latency L-queue and CE-marks it instead of dropping. Deleted for S0/S1 so those
+# stay Not-ECT (classic drop). Applies to all transports; iperf runs on h2/h3, not h0.
 for n in h0 h1; do docker exec "clab-$LAB-$n" sysctl -qw net.ipv4.tcp_ecn="$ECN" 2>/dev/null; done
+docker exec "clab-$LAB-h0" nft delete table ip mangle 2>/dev/null || true
+if [ "$ECN" = 1 ]; then
+  docker exec "clab-$LAB-h0" sh -c 'nft add table ip mangle; nft "add chain ip mangle out { type filter hook output priority mangle ; }"; nft add rule ip mangle out meta l4proto udp ip ecn set ect1' 2>/dev/null
+fi
 
 # --- config for this run ---------------------------------------------------------
 cp "$CFG" "$CFG.clabbak"
