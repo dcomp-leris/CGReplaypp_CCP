@@ -132,7 +132,7 @@ index c651d00..3d70d2e 100755
  
          if frame is None:
 diff --git a/server/roq_sender.py b/server/roq_sender.py
-index cbf0a90..f02de0d 100644
+index cbf0a90..b849f12 100644
 --- a/server/roq_sender.py
 +++ b/server/roq_sender.py
 @@ -181,6 +181,9 @@ class RoQSenderProtocol(QuicConnectionProtocol):
@@ -169,7 +169,7 @@ index cbf0a90..f02de0d 100644
              self._seq += 1
          self.transmit()
          return n
-@@ -240,41 +245,60 @@ class RoQSenderProtocol(QuicConnectionProtocol):
+@@ -240,41 +245,65 @@ class RoQSenderProtocol(QuicConnectionProtocol):
          frames = list_frames()
          previous_time = time.perf_counter()
          pts = 0
@@ -210,8 +210,13 @@ index cbf0a90..f02de0d 100644
 +
 +                self._tx_index += 1
 +                inst = self._tx_index
-+                rtp_ts = (inst * RTP_CLOCK) // FPS & 0xFFFFFFFF
 +                send_time = time.perf_counter()
++                # rtp_ts tracks REAL elapsed time (not inst/FPS): RoQ sends well below the
++                # config fps, so an index-based timestamp drifts from wall clock and the
++                # merge's wall-minus-rtp_ts one-way delay accumulates that drift (~10 s over
++                # a 120 s run). Time-based keeps rtp_ts unique+monotonic AND aligned to wall,
++                # so OWD is the true network delay.
++                rtp_ts = int((send_time - self._session_start) * RTP_CLOCK) & 0xFFFFFFFF
 +                _vfr_f.write(f"{inst},{frame_id},,{time.time():.6f},{send_time:.6f},{pts},"
 +                             f"{rtp_ts},{self._bitrate},{self._bitrate},{frame.nbytes}\n")
 +                n_frags = self._send_frame_datagrams(frame_id, inst, rtp_ts, payload, send_time)
