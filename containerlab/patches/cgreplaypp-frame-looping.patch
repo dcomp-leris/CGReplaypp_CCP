@@ -270,10 +270,16 @@ index cbf0a90..b849f12 100644
          duration = time.perf_counter() - self._session_start
          avg_fps = self._frame_count / max(duration, 1e-6)
 diff --git a/tools/build_rtp_dataset.py b/tools/build_rtp_dataset.py
-index a9f4213..bc418f0 100644
+index a9f4213..fc14ec3 100644
 --- a/tools/build_rtp_dataset.py
 +++ b/tools/build_rtp_dataset.py
-@@ -114,6 +114,16 @@ def load_packets(run, cfg, codec):
+@@ -109,14 +109,24 @@ def load_packets(run, cfg, codec):
+         vp = os.path.splitext(os.path.basename(pcap))[0]
+         rows = []
+         try:
+-            for ts, src, sport, dst, dport, pl, ip_len in read_pcap(pcap):
++            for ts, src, sport, dst, dport, pl, ip_len, ecn in read_pcap(pcap):
+                 if not is_rtcp(pl) and (dport == rtp_port or srv_ssrcs) and src != ply_ip:
                      r = describe_rtp(pl, codec)
                      # video = RTP from the server's SSRC (or to the RTP port when no server log)
                      if r is not None and r["pt"] >= 96 and (r["ssrc"] in srv_ssrcs if srv_ssrcs else dport == rtp_port):
@@ -289,8 +295,33 @@ index a9f4213..bc418f0 100644
 +                            r["payload_len"] = max(true_pkt - overhead, 0)
                          rows.append([vp, ts, r["seq"], r["ts"], r["marker"], r["pt"], r["ssrc"],
                                       r["pkt_len"], r["payload_len"], r["ext"], r["nal"], r["inner"],
-                                      r["fu_start"], r["fu_end"], r["slice"], r["keyframe"], "", ""])
-@@ -297,8 +307,24 @@ def map_player(run, srv_frames, protocol):
+-                                     r["fu_start"], r["fu_end"], r["slice"], r["keyframe"], "", ""])
++                                     r["fu_start"], r["fu_end"], r["slice"], r["keyframe"], "", "", ecn])
+                         continue
+                 if dport == cmd_port and src == ply_ip:
+                     txt = pl.decode(errors="replace").strip()
+@@ -137,8 +147,11 @@ def load_packets(run, cfg, codec):
+             if rows:
+                 print(f"  {vp}: RoQ pcap decrypted with quic_keylog.txt -> {len(rows)} RTP datagrams")
+         if rows:
+-            frames.append(pd.DataFrame(rows, columns=PKT_COLS))
++            cols = PKT_COLS + (["ecn"] if len(rows[0]) == len(PKT_COLS) + 1 else [])
++            frames.append(pd.DataFrame(rows, columns=cols))
+     pk = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=PKT_COLS)
++    if "ecn" not in pk.columns:     # no clear-RTP pcap rows (server-tap only, or RoQ)
++        pk["ecn"] = np.nan
+     cm = pd.DataFrame(cmds, columns=["vp", "wall", "type", "frame_id", "number", "fps", "cps", "size"])
+     ot = pd.DataFrame(other, columns=["vp", "wall", "src", "sport", "dst", "dport", "kind",
+                                       "rtcp_pt", "rtcp_fmt", "udp_payload", "ip_len"])
+@@ -209,6 +222,7 @@ def rtp_frames(pk, srv_frames):
+             "pkts": len(g), "pkts_expected": n_exp, "lost_pkts": lost,
+             "complete": int(lost == 0 and len(mk) > 0), "marker_seen": int(len(mk) > 0),
+             "reordered_pkts": int(g["reordered"].sum()), "dup_pkts": int(g["duplicate"].sum()),
++            "ce_pkts": int((g["ecn"] == 3).sum()), "ect_pkts": int(g["ecn"].isin([1, 2]).sum()),
+             "rtp_bytes": int(g["pkt_len"].sum()), "payload_bytes": int(g["payload_len"].sum()),
+             "first_wall": t0, "last_wall": t1, "marker_wall": mk["wall"].min() if len(mk) else np.nan,
+             "spread_ms": (t1 - t0) * 1000.0,
+@@ -297,8 +311,24 @@ def map_player(run, srv_frames, protocol):
  
  
  # ============================================================================ quality
@@ -316,7 +347,7 @@ index a9f4213..bc418f0 100644
      if img is None:
          return None
      if img.shape[1] != w or img.shape[0] != h:     # same resize the server applies
-@@ -326,34 +352,58 @@ def find_ffmpeg():
+@@ -326,34 +356,58 @@ def find_ffmpeg():
      return None
  
  
@@ -396,7 +427,7 @@ index a9f4213..bc418f0 100644
              log = os.path.join(work, "vmaf.json")
              subprocess.run([ff, "-hide_banner", "-loglevel", "error",
                              "-framerate", str(fps), "-i", os.path.join(work, "d%05d.png"),
-@@ -363,10 +413,14 @@ def quality(pairs, w, h, fps, want_vmaf, want_lpips):
+@@ -363,10 +417,14 @@ def quality(pairs, w, h, fps, want_vmaf, want_lpips):
                              "-f", "null", "-"], check=False)
              if os.path.exists(log):
                  for fr in json.load(open(log)).get("frames", []):
@@ -415,7 +446,24 @@ index a9f4213..bc418f0 100644
              shutil.rmtree(work, ignore_errors=True)
      return res
  
-@@ -439,22 +493,17 @@ def build(run, args):
+@@ -408,6 +466,7 @@ def build(run, args):
+     vf["server_fps_push"] = 1.0 / vf["push_wall"].diff().replace(0, np.nan)
+     if len(fr):
+         feats = ["pkts", "pkts_expected", "lost_pkts", "complete", "reordered_pkts", "dup_pkts",
++                 "ce_pkts", "ect_pkts",
+                  "rtp_bytes", "payload_bytes", "first_wall", "last_wall", "spread_ms", "owd_first_ms",
+                  "owd_last_ms", "jitter_ms", "iat_ms", "fps_arrival", "fps_rtp_ts", "kbps_1s"]
+         st = fr[fr["vp"] == "server_tx"].set_index("rtp_ts")
+@@ -417,7 +476,7 @@ def build(run, args):
+         for vp in [v for v in VP_ORDER if v in set(fr["vp"])] + sorted(set(fr["vp"]) - set(VP_ORDER)):
+             d = fr[fr["vp"] == vp].drop_duplicates("rtp_ts").set_index("rtp_ts")
+             for c in feats:
+-                if vp == "server_tx" and c in ("owd_first_ms", "owd_last_ms", "lost_pkts", "complete"):
++                if vp == "server_tx" and c in ("owd_first_ms", "owd_last_ms", "lost_pkts", "complete", "ce_pkts", "ect_pkts"):
+                     continue
+                 vf[f"{vp}_{c}"] = vf["rtp_ts"].map(d[c])
+             if vp != "server_tx":
+@@ -439,22 +498,17 @@ def build(run, args):
          print(f"  player: decoded={len(pf)}  mapped: " +
                ", ".join(f"{k}={v}" for k, v in pf["map_method"].value_counts().items()))
  
@@ -445,3 +493,36 @@ index a9f4213..bc418f0 100644
      for k in ("game", "transport", "codec", "bw_mbps", "bottleneck_mbps", "delay", "loss_pct"):
          vf.insert(0, k, meta.get(k, ""))
      vf.insert(0, "run_id", meta.get("run_id", os.path.basename(os.path.normpath(run))))
+diff --git a/tools/rtp_parse.py b/tools/rtp_parse.py
+index e52ad23..5f074ab 100644
+--- a/tools/rtp_parse.py
++++ b/tools/rtp_parse.py
+@@ -211,13 +211,14 @@ def read_pcap(path):
+             if pkt[off + 9] != 17:                 # UDP only
+                 continue
+             ip_len = struct.unpack_from("!H", pkt, off + 2)[0]
++            ecn = pkt[off + 1] & 0x03               # IP ECN: 0 Not-ECT, 1 ECT(1), 2 ECT(0), 3 CE
+             src = ".".join(map(str, pkt[off + 12:off + 16]))
+             dst = ".".join(map(str, pkt[off + 16:off + 20]))
+             u = off + ihl
+             if len(pkt) < u + 8:
+                 continue
+             sport, dport, ulen = struct.unpack_from("!HHH", pkt, u)
+-            yield ts, src, sport, dst, dport, pkt[u + 8:u + ulen], ip_len
++            yield ts, src, sport, dst, dport, pkt[u + 8:u + ulen], ip_len, ecn
+ 
+ 
+ # --------------------------------------------------------------------------- logs
+diff --git a/tools/verify_rtp_mapping.py b/tools/verify_rtp_mapping.py
+index b43bb43..f31f9c2 100644
+--- a/tools/verify_rtp_mapping.py
++++ b/tools/verify_rtp_mapping.py
+@@ -80,7 +80,7 @@ def main():
+     ts2fid = srv.dropna(subset=["frame_id"]).groupby("rtp_ts")["frame_id"].first().astype(int).to_dict()
+ 
+     aus, order = {}, []
+-    for ts, src, sp, dst, dp, pl, _ in read_pcap(os.path.join(a.run, "pcap", f"{a.pcap}.pcap")):
++    for ts, src, sp, dst, dp, pl, *_ in read_pcap(os.path.join(a.run, "pcap", f"{a.pcap}.pcap")):
+         r = parse_rtp(pl)
+         if r is None or r["ssrc"] != ssrc or r["pt"] < 96:
+             continue
