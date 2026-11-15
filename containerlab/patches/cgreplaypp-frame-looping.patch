@@ -270,7 +270,7 @@ index cbf0a90..b849f12 100644
          duration = time.perf_counter() - self._session_start
          avg_fps = self._frame_count / max(duration, 1e-6)
 diff --git a/tools/build_rtp_dataset.py b/tools/build_rtp_dataset.py
-index a9f4213..87595ac 100644
+index a9f4213..556549f 100644
 --- a/tools/build_rtp_dataset.py
 +++ b/tools/build_rtp_dataset.py
 @@ -63,7 +63,8 @@ def roq_rtp_from_pcap(pcap, keylog, codec, vp):
@@ -462,7 +462,7 @@ index a9f4213..87595ac 100644
              log = os.path.join(work, "vmaf.json")
              subprocess.run([ff, "-hide_banner", "-loglevel", "error",
                              "-framerate", str(fps), "-i", os.path.join(work, "d%05d.png"),
-@@ -363,10 +422,14 @@ def quality(pairs, w, h, fps, want_vmaf, want_lpips):
+@@ -363,14 +422,86 @@ def quality(pairs, w, h, fps, want_vmaf, want_lpips):
                              "-f", "null", "-"], check=False)
              if os.path.exists(log):
                  for fr in json.load(open(log)).get("frames", []):
@@ -481,7 +481,79 @@ index a9f4213..87595ac 100644
              shutil.rmtree(work, ignore_errors=True)
      return res
  
-@@ -408,6 +471,7 @@ def build(run, args):
+ 
++def compute_qoe(run, vf):
++    """CGSynth objective QoE model (ACM TOMM, DOI 10.1145/3860633):
++
++        QoE   = dvid * Q_video + dint * Q_Int              (dvid+dint normalised to 1)
++        Q_Int = beta * Q_delay + (1 - beta) * Q_sync
++        Q_sync    = mean(Q_Vsmooth, Q_Csmooth)
++        Q_Vsmooth = mean clip(FPS_receiver / FPS_server, 0, 1)    (server_logs/srv_QoEMetrics.csv)
++        Q_Csmooth = mean clip(CPS_server  / CPS_receiver, 0, 1)
++        Q_delay   = 1 / (1 + exp(0.1 * (RT_ms - 50)))            RT from player_logs/responsetime_CG.csv
++        Q_video   = mean(VMAF)/100 (per frame: that frame's VMAF/100)
++
++    Weights CGREPLAY_QOE_DVID / DINT / BETA default 0.5 (the paper's per-game weights drop in
++    later without re-running). LPIPS is not used. Returns the run-level component dict and
++    sets a per-frame vf["QoE"] (frame VMAF combined with the run-level interactivity)."""
++    import math
++    dvid = float(os.environ.get("CGREPLAY_QOE_DVID", 0.5) or 0.5)
++    dint = float(os.environ.get("CGREPLAY_QOE_DINT", 0.5) or 0.5)
++    beta = min(1.0, max(0.0, float(os.environ.get("CGREPLAY_QOE_BETA", 0.5) or 0.5)))
++    s = dvid + dint
++    if s > 0:
++        dvid, dint = dvid / s, dint / s
++
++    def mean_clip_ratio(df, num, den):
++        if not {num, den} <= set(df.columns):
++            return None
++        d = df[pd.to_numeric(df[den], errors="coerce") > 0]
++        if d.empty:
++            return None
++        r = (pd.to_numeric(d[num], errors="coerce") / pd.to_numeric(d[den], errors="coerce")).clip(0, 1)
++        return float(r.mean()) if r.notna().any() else None
++
++    qv = qc = qdelay = rt_ms = None
++    qp = os.path.join(run, "server_logs", "srv_QoEMetrics.csv")
++    if os.path.exists(qp) and os.path.getsize(qp) > 0:
++        q = pd.read_csv(qp)
++        qv = mean_clip_ratio(q, "received_fps", "current_srv_fps")   # Q_Vsmooth
++        qc = mean_clip_ratio(q, "current_cps", "received_cps")       # Q_Csmooth
++    rp = os.path.join(run, "player_logs", "responsetime_CG.csv")
++    if os.path.exists(rp) and os.path.getsize(rp) > 0:
++        r = pd.read_csv(rp)
++        if {"frame_timestamp", "cmd_timestamp"} <= set(r.columns) and len(r):
++            rt_ms = float(((pd.to_numeric(r["frame_timestamp"], errors="coerce")
++                            - pd.to_numeric(r["cmd_timestamp"], errors="coerce")).abs() * 1000).mean())
++            if rt_ms == rt_ms:                                       # not NaN
++                qdelay = 1.0 / (1.0 + math.exp(0.1 * (rt_ms - 50.0)))
++
++    syncs = [x for x in (qv, qc) if x is not None]
++    qsync = sum(syncs) / len(syncs) if syncs else None
++    if qdelay is not None and qsync is not None:
++        qint = beta * qdelay + (1 - beta) * qsync
++    else:
++        qint = qdelay if qdelay is not None else qsync
++
++    vmaf = pd.to_numeric(vf["VMAF"], errors="coerce") if "VMAF" in vf else None
++    if vmaf is not None and vmaf.notna().any():
++        qvideo = float(vmaf.mean()) / 100.0
++    else:
++        ss = pd.to_numeric(vf["SSIM"], errors="coerce") if "SSIM" in vf else None
++        qvideo = float(ss.mean()) if ss is not None and ss.notna().any() else None
++
++    qoe = (dvid * qvideo + dint * qint) if (qvideo is not None and qint is not None) else None
++    if qint is not None and vmaf is not None:
++        vf["QoE"] = dvid * (vmaf / 100.0) + dint * qint
++    return {"QoE": qoe, "Q_video": qvideo, "Q_Int": qint, "Q_sync": qsync,
++            "Q_Vsmooth": qv, "Q_Csmooth": qc, "Q_delay": qdelay, "RT_ms": rt_ms,
++            "weights": {"dvid": dvid, "dint": dint, "beta": beta}}
++
++
+ # ============================================================================ main
+ def build(run, args):
+     meta = json.load(open(os.path.join(run, "run.json"))) if os.path.exists(os.path.join(run, "run.json")) else {}
+@@ -408,6 +539,7 @@ def build(run, args):
      vf["server_fps_push"] = 1.0 / vf["push_wall"].diff().replace(0, np.nan)
      if len(fr):
          feats = ["pkts", "pkts_expected", "lost_pkts", "complete", "reordered_pkts", "dup_pkts",
@@ -489,7 +561,7 @@ index a9f4213..87595ac 100644
                   "rtp_bytes", "payload_bytes", "first_wall", "last_wall", "spread_ms", "owd_first_ms",
                   "owd_last_ms", "jitter_ms", "iat_ms", "fps_arrival", "fps_rtp_ts", "kbps_1s"]
          st = fr[fr["vp"] == "server_tx"].set_index("rtp_ts")
-@@ -417,7 +481,7 @@ def build(run, args):
+@@ -417,7 +549,7 @@ def build(run, args):
          for vp in [v for v in VP_ORDER if v in set(fr["vp"])] + sorted(set(fr["vp"]) - set(VP_ORDER)):
              d = fr[fr["vp"] == vp].drop_duplicates("rtp_ts").set_index("rtp_ts")
              for c in feats:
@@ -498,7 +570,7 @@ index a9f4213..87595ac 100644
                      continue
                  vf[f"{vp}_{c}"] = vf["rtp_ts"].map(d[c])
              if vp != "server_tx":
-@@ -439,22 +503,17 @@ def build(run, args):
+@@ -439,22 +571,23 @@ def build(run, args):
          print(f"  player: decoded={len(pf)}  mapped: " +
                ", ".join(f"{k}={v}" for k, v in pf["map_method"].value_counts().items()))
  
@@ -525,6 +597,12 @@ index a9f4213..87595ac 100644
                  vf[metric] = vf["instance"].map(vals)
 -        print(f"  quality computed for {len(pairs)} frames ({', '.join(c for c in ('PSNR','SSIM','VMAF','LPIPS') if c in vf)})")
 +        print(f"  quality computed for {len(q)} frames ({', '.join(c for c in ('PSNR','SSIM','VMAF','LPIPS') if c in vf)})")
++    qoe = compute_qoe(run, vf)
++    with open(os.path.join(out, "qoe.json"), "w") as f:
++        json.dump(qoe, f, indent=2)
++    if qoe.get("QoE") is not None:
++        print(f"  QoE(run)={qoe['QoE']:.3f}  [Q_video={qoe['Q_video']:.3f} Q_Int={qoe['Q_Int']:.3f}"
++              f" (Vsmooth={qoe['Q_Vsmooth']} Csmooth={qoe['Q_Csmooth']} Q_delay={qoe['Q_delay']} RT={qoe['RT_ms']}ms)]")
      for k in ("game", "transport", "codec", "bw_mbps", "bottleneck_mbps", "delay", "loss_pct"):
          vf.insert(0, k, meta.get(k, ""))
      vf.insert(0, "run_id", meta.get("run_id", os.path.basename(os.path.normpath(run))))
