@@ -5,7 +5,7 @@
 set -u
 RUN="$1"; GAME="$2"; TRANSPORT="$3"; RUNJSON="$4"; shift 4
 REPO=/home/hugo/CGSynth/CGReplaypp
-VENV=/home/hugo/venv/bin/python3
+VENV=/home/hugo/CGSynth/CGReplaypp/.venv/bin/python3   # uv env (see CGReplaypp/pyproject.toml)
 FFMPEG=/home/hugo/CGSynth/tools/ffmpeg-vmaf/ffmpeg
 
 mkdir -p "$RUN/server_logs" "$RUN/player_logs" "$RUN/pcap"

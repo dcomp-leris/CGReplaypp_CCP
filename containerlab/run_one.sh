@@ -15,7 +15,11 @@
 set -u
 TRANSPORT="${1:?transport}"; GAME="${2:?game}"; SCENARIO="${3:?scenario}"; REP="${4:-1}"
 REPO=/home/hugo/CGSynth/CGReplaypp
-LAB=cgreplay4; SYS=/usr/bin/python3; VENV=/home/hugo/venv/bin/python3
+LAB=cgreplay4
+# Single uv-managed environment for every transport + the merge: .venv in the CGReplaypp
+# repo, created with --system-site-packages so GStreamer/gi come from the system while uv
+# pins aioquic/av/scikit-image/opencv/numpy-2 (see CGReplaypp/pyproject.toml).
+VENV=/home/hugo/CGSynth/CGReplaypp/.venv/bin/python3; SYS=$VENV
 CFG="$REPO/config/config.yaml"
 LABDIR=/home/hugo/cc-lab
 B="${B:-10mbit}"; C="${C:-8M}"; DURATION="${DURATION:-120}"

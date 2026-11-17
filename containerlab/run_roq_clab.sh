@@ -3,7 +3,7 @@
 # Run as root. Uses the alireza-branch roq_sender/roq_receiver (venv: aioquic, PyAV).
 set -u
 REPO=/home/hugo/CGSynth/CGReplaypp
-LAB=cgreplay4; VENV=/home/hugo/venv/bin/python3; CFG="$REPO/config/config.yaml"
+LAB=cgreplay4; VENV=/home/hugo/CGSynth/CGReplaypp/.venv/bin/python3; CFG="$REPO/config/config.yaml"
 PCAP=/tmp/clab_roq.pcap
 pid(){ docker inspect -f '{{.State.Pid}}' "clab-$LAB-$1" 2>/dev/null; }
 H0=$(pid h0); H1=$(pid h1); S2=$(pid s2)

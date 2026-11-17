@@ -6,7 +6,7 @@ set -u
 REPO=/home/hugo/CGSynth/CGReplay
 LAB=cgreplay4
 SYS=/usr/bin/python3
-VENV=/home/hugo/venv/bin/python3
+VENV=/home/hugo/CGSynth/CGReplaypp/.venv/bin/python3
 FFMPEG=/home/hugo/CGSynth/tools/ffmpeg-vmaf/ffmpeg
 CFG="$REPO/config/config.yaml"
 PCAP=/tmp/clab_capture.pcap
