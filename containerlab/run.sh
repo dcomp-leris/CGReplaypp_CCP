@@ -4,7 +4,9 @@
 #
 #   run.sh <transport> [duration_s] [game] [scenario] [rep]
 #
-#   transport : webrtc-twcc | webrtc-rfc8888 | roq | roq-cubic | scream   (quic: WIP)
+#   transport : webrtc-twcc | webrtc-rfc8888 | quic | roq | roq-cubic | scream
+#               (quic = plain QUIC over reliable streams; its dataset has quality+QoE but
+#                no per-frame pcap network features, since it is not RTP)
 #   duration  : session length in seconds (default 120; e.g. 60, 120, 300)
 #   game      : Fortnite (default) | Kombat | Forza
 #   scenario  : S0-M (default S1-M) ... S{0,1,2}-{M,L}  (cross-traffic level x bottleneck link)
@@ -18,7 +20,7 @@
 set -euo pipefail
 LAB=cgreplay4; LABDIR=/home/hugo/cc-lab
 
-T="${1:?transport: webrtc-twcc|webrtc-rfc8888|roq|roq-cubic|scream}"
+T="${1:?transport: webrtc-twcc|webrtc-rfc8888|quic|roq|roq-cubic|scream}"
 DUR="${2:-120}"; GAME="${3:-Fortnite}"; SCN="${4:-S1-M}"; REP="${5:-1}"
 
 # A reboot wipes the containerlab veth wiring; redeploy + reattach DualQ if the server IP is gone.

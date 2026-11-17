@@ -83,6 +83,11 @@ case "$TRANSPORT" in
     sed -i 's/QUIC: True/QUIC: False/; s/SCReAM: True/SCReAM: False/; s/RoQ: True/RoQ: False/' "$CFG"
     SRV_ENV="$LOOP_ENV CGREPLAY_CC_FEEDBACK=$FB DISPLAY=:0 PYTHONUNBUFFERED=1"; SRV_PY=$SYS
     GAM_ENV="$LOOP_ENV CGREPLAY_CC_FEEDBACK=$FB DISPLAY=:0 PYTHONUNBUFFERED=1"; GAM_PY=$SYS ;;
+  quic)
+    # plain QUIC: one reliable unidirectional stream per frame (no RTP).
+    sed -i 's/RoQ: True/RoQ: False/; s/SCReAM: True/SCReAM: False/; s/QUIC: False/QUIC: True/' "$CFG"
+    SRV_ENV="$LOOP_ENV DISPLAY=:0 PYTHONUNBUFFERED=1"; SRV_PY=$VENV
+    GAM_ENV="$LOOP_ENV DISPLAY=:0 PYTHONUNBUFFERED=1"; GAM_PY=$VENV ;;
   roq|roq-*)
     # roq-<cc> selects the QUIC congestion control (reno|cubic; aioquic has no BBR).
     # Bare "roq" = reno. The sender reads CGREPLAY_QUIC_CC.
@@ -106,7 +111,7 @@ esac
 # (the merge recovers the true packet size from the IP total-length field). RoQ must be
 # captured whole: its RTP rides inside the encrypted QUIC payload and tshark needs the
 # full datagram (+AEAD tag) to decrypt it. Override with SNAP=.
-case $TRANSPORT in roq|roq-*) SNAP=0;; *) SNAP="${SNAP:-160}";; esac
+case $TRANSPORT in roq|roq-*|quic) SNAP=0;; *) SNAP="${SNAP:-160}";; esac
 rm -f "$PCAP_T" "$PCAP_G"
 nsenter -t "$SNIFF_PID" -n tcpdump -i "$SNIFF_IF" -s "$SNAP" -w "$PCAP_T" "udp and not port $IPERF_PORT" >/dev/null 2>&1 & TD1=$!
 [ "$SNIFF_PID" != "$GAMER_SNIFF_PID" ] && { nsenter -t "$GAMER_SNIFF_PID" -n tcpdump -i eth2 -s "$SNAP" -w "$PCAP_G" "udp and not port $IPERF_PORT" >/dev/null 2>&1 & TD2=$!; } || TD2=""
