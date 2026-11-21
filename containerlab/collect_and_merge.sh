@@ -29,10 +29,17 @@ cd "$REPO" && CGREPLAY_FFMPEG="$FFMPEG" "$VENV" "$REPO/tools/build_rtp_dataset.p
 
 # Lean mode (default ON while the disk is tight): the merge has baked per-frame
 # PSNR/SSIM/VMAF into dataset/video_frames.csv, so the bulky received_frames copy
-# is no longer needed. Keep the CSV, logs, run.json, iperf.json and pcaps.
+# is no longer needed. CGREPLAY_PCAP decides what to do with the (now-parsed) pcaps:
+#   keep (default) — leave them as-is (single runs / re-analysis)
+#   gzip           — gzip them (~4x smaller, still re-analysable) — good for the matrix
+#   drop           — delete them (the per-frame features are already in the CSV)
 if [ "${CGREPLAY_LEAN:-1}" = 1 ] && [ -s "$RUN/dataset/video_frames.csv" ]; then
     rm -rf "$RUN/received_frames"
     rm -rf /tmp/cg_vmaf_* 2>/dev/null   # libvmaf scratch (root-owned, from this merge)
-    echo "[lean] removed received_frames copy (quality is in the CSV); kept pcaps+CSV+logs"
+    case "${CGREPLAY_PCAP:-keep}" in
+        gzip) gzip -f "$RUN"/pcap/*.pcap 2>/dev/null; echo "[lean] received_frames removed; pcaps gzipped; CSV+logs kept" ;;
+        drop) rm -f "$RUN"/pcap/*.pcap 2>/dev/null; echo "[lean] received_frames + pcaps removed (features are in the CSV)" ;;
+        *)    echo "[lean] removed received_frames copy (quality is in the CSV); kept pcaps+CSV+logs" ;;
+    esac
 fi
 du -sh "$RUN" 2>/dev/null | sed 's/^/[run size] /'

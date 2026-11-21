@@ -18,6 +18,7 @@ SCENARIOS="${SCENARIOS:-S0-M S0-L S1-M S1-L S2-M S2-L}"
 export CGREPLAY_VMAF_STRIDE="${CGREPLAY_VMAF_STRIDE:-5}"
 export DURATION="${DURATION:-120}" B="${B:-10mbit}" C="${C:-8M}"
 export IPERF_START="${IPERF_START:-30}" IPERF_LEN="${IPERF_LEN:-60}"
+export CGREPLAY_PCAP="${CGREPLAY_PCAP:-gzip}"   # gzip pcaps after merge (keep | gzip | drop) so 180 runs fit
 MINFREE_MB="${MINFREE_MB:-800}"            # abort before a run if the disk is this low
 LOG="$LAB/matrix_$(date +%Y%m%d-%H%M%S).log"
 
@@ -45,7 +46,7 @@ for rep in $(seq 1 "$REPS"); do            # rep outer → each sweep is a compl
       fi
       echo "=== [$n/$total] $t $s rep$rep | free ${free}MB | $(date +%T) ===" | tee -a "$LOG"
       if sudo CGREPLAY_VMAF_STRIDE="$CGREPLAY_VMAF_STRIDE" DURATION="$DURATION" B="$B" C="$C" \
-           IPERF_START="$IPERF_START" IPERF_LEN="$IPERF_LEN" \
+           IPERF_START="$IPERF_START" IPERF_LEN="$IPERF_LEN" CGREPLAY_PCAP="$CGREPLAY_PCAP" \
            ./run_one.sh "$t" "$GAME" "$s" "$rep" >>"$LOG" 2>&1; then
         rd=$(ls -dt results/${GAME}_${t}_${s}_r${rep}_* 2>/dev/null | head -1)
         if [ -s "$rd/dataset/video_frames.csv" ]; then
