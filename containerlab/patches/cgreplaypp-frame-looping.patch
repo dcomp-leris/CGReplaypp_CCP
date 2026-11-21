@@ -39,7 +39,7 @@ index ba1368e..47aac1d 100755
      # Write any remaining in the log
      if log_frame_buffer:
 diff --git a/player/quic_receiver.py b/player/quic_receiver.py
-index 3f6fe14..3723f1e 100644
+index 3f6fe14..874db23 100644
 --- a/player/quic_receiver.py
 +++ b/player/quic_receiver.py
 @@ -43,6 +43,9 @@ with open(CONFIG_PATH) as f:
@@ -52,6 +52,15 @@ index 3f6fe14..3723f1e 100644
  SERVER_IP       = config["server"]["server_IP"]
  QUIC_PORT       = config["protocols"].get("quic_port", 4433)
  PLAYER_IP       = config["gamer"]["player_IP"]
+@@ -134,7 +137,7 @@ def read_qr(frame: np.ndarray) -> tuple[int, str | None]:
+ # inside Mininet; the system's GTK build does (same path RTP/SCReAM use). The
+ # receiver just writes frames to RECV_DIR and the viewer shows the newest one.
+ # ---------------------------------------------------------------------------
+-SYS_PY      = "/usr/bin/python3"
++SYS_PY      = "/home/hugo/CGSynth/CGReplaypp/.venv/bin/python3"
+ VIEWER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frame_viewer.py")
+ STOP_FILE   = "/tmp/quic_viewer_stop"
+ 
 @@ -259,7 +262,7 @@ class QUICReceiverProtocol(QuicConnectionProtocol):
  
          self._frame_counter += 1
@@ -79,7 +88,7 @@ index 3f6fe14..3723f1e 100644
      print("[QUIC] Receiver finished.")
  
 diff --git a/player/roq_receiver.py b/player/roq_receiver.py
-index fc98af9..4cd915a 100644
+index fc98af9..9d4a6e3 100644
 --- a/player/roq_receiver.py
 +++ b/player/roq_receiver.py
 @@ -79,6 +79,12 @@ HDR_SIZE  = RTP_SIZE + FRAG_SIZE        # 28 bytes
@@ -95,6 +104,15 @@ index fc98af9..4cd915a 100644
  
  FRAME_LOG = os.path.join(LOG_DIR, "ply_roq_frame.csv")
  RATE_LOG  = os.path.join(LOG_DIR, "ratelog_roq.csv")
+@@ -154,7 +160,7 @@ def read_qr(frame: np.ndarray) -> tuple[int, str | None]:
+ # ---------------------------------------------------------------------------
+ # Live display — same separate-process viewer used by the QUIC receiver.
+ # ---------------------------------------------------------------------------
+-SYS_PY      = "/usr/bin/python3"
++SYS_PY      = "/home/hugo/CGSynth/CGReplaypp/.venv/bin/python3"
+ VIEWER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frame_viewer.py")
+ STOP_FILE   = "/tmp/quic_viewer_stop"
+ 
 @@ -213,6 +219,10 @@ class RoQReceiverProtocol(QuicConnectionProtocol):
          """Finish the session if the stream goes silent (e.g. last frame lost)."""
          while not self._done.is_set():
@@ -423,7 +441,7 @@ index cbf0a90..501f20f 100644
  
      await serve(
 diff --git a/tools/build_rtp_dataset.py b/tools/build_rtp_dataset.py
-index a9f4213..556549f 100644
+index a9f4213..bfd35c3 100644
 --- a/tools/build_rtp_dataset.py
 +++ b/tools/build_rtp_dataset.py
 @@ -63,7 +63,8 @@ def roq_rtp_from_pcap(pcap, keylog, codec, vp):
@@ -615,7 +633,7 @@ index a9f4213..556549f 100644
              log = os.path.join(work, "vmaf.json")
              subprocess.run([ff, "-hide_banner", "-loglevel", "error",
                              "-framerate", str(fps), "-i", os.path.join(work, "d%05d.png"),
-@@ -363,14 +422,86 @@ def quality(pairs, w, h, fps, want_vmaf, want_lpips):
+@@ -363,14 +422,87 @@ def quality(pairs, w, h, fps, want_vmaf, want_lpips):
                              "-f", "null", "-"], check=False)
              if os.path.exists(log):
                  for fr in json.load(open(log)).get("frames", []):
@@ -646,9 +664,10 @@ index a9f4213..556549f 100644
 +        Q_delay   = 1 / (1 + exp(0.1 * (RT_ms - 50)))            RT from player_logs/responsetime_CG.csv
 +        Q_video   = mean(VMAF)/100 (per frame: that frame's VMAF/100)
 +
-+    Weights CGREPLAY_QOE_DVID / DINT / BETA default 0.5 (the paper's per-game weights drop in
-+    later without re-running). LPIPS is not used. Returns the run-level component dict and
-+    sets a per-frame vf["QoE"] (frame VMAF combined with the run-level interactivity)."""
++    Weights are equal and the same for every game (dvid = dint = beta = 0.5), per Alireza's
++    decision to keep the model simple — no per-game weighting. CGREPLAY_QOE_DVID / DINT / BETA
++    can still override for sensitivity checks. LPIPS is not used. Returns the run-level
++    component dict and sets a per-frame vf["QoE"] (frame VMAF with the run-level interactivity)."""
 +    import math
 +    dvid = float(os.environ.get("CGREPLAY_QOE_DVID", 0.5) or 0.5)
 +    dint = float(os.environ.get("CGREPLAY_QOE_DINT", 0.5) or 0.5)
@@ -706,7 +725,7 @@ index a9f4213..556549f 100644
  # ============================================================================ main
  def build(run, args):
      meta = json.load(open(os.path.join(run, "run.json"))) if os.path.exists(os.path.join(run, "run.json")) else {}
-@@ -408,6 +539,7 @@ def build(run, args):
+@@ -408,6 +540,7 @@ def build(run, args):
      vf["server_fps_push"] = 1.0 / vf["push_wall"].diff().replace(0, np.nan)
      if len(fr):
          feats = ["pkts", "pkts_expected", "lost_pkts", "complete", "reordered_pkts", "dup_pkts",
@@ -714,7 +733,7 @@ index a9f4213..556549f 100644
                   "rtp_bytes", "payload_bytes", "first_wall", "last_wall", "spread_ms", "owd_first_ms",
                   "owd_last_ms", "jitter_ms", "iat_ms", "fps_arrival", "fps_rtp_ts", "kbps_1s"]
          st = fr[fr["vp"] == "server_tx"].set_index("rtp_ts")
-@@ -417,7 +549,7 @@ def build(run, args):
+@@ -417,7 +550,7 @@ def build(run, args):
          for vp in [v for v in VP_ORDER if v in set(fr["vp"])] + sorted(set(fr["vp"]) - set(VP_ORDER)):
              d = fr[fr["vp"] == vp].drop_duplicates("rtp_ts").set_index("rtp_ts")
              for c in feats:
@@ -723,7 +742,7 @@ index a9f4213..556549f 100644
                      continue
                  vf[f"{vp}_{c}"] = vf["rtp_ts"].map(d[c])
              if vp != "server_tx":
-@@ -439,22 +571,23 @@ def build(run, args):
+@@ -439,22 +572,23 @@ def build(run, args):
          print(f"  player: decoded={len(pf)}  mapped: " +
                ", ".join(f"{k}={v}" for k, v in pf["map_method"].value_counts().items()))
  
