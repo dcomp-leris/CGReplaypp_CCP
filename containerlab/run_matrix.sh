@@ -3,7 +3,10 @@
 #   REPS repetitions x transports x (S0/S1/S2 x middle/last-mile).
 # Each cell is one 120 s run via run_one.sh (bottleneck + ECN + timed iperf + merge).
 # Defaults: all six transports, VMAF stride 5. The full study is REPS=5:
-#   REPS=5 ./run_matrix.sh
+#   REPS=5 CGREPLAY_PCAP=drop ./run_matrix.sh
+# RESUMABLE: cells whose dataset already exists are skipped, so you can stop it any time
+# (Ctrl-C, reboot, VM off) and resume by re-running the SAME command — it continues where it
+# left off. No need to run the ~21 h in one sitting.
 # Override any knob by env, e.g. REPS=5 GAME=Kombat TRANSPORTS="roq-reno roq-cubic" ...
 set -u
 LAB=/home/hugo/cc-lab
@@ -39,6 +42,14 @@ for rep in $(seq 1 "$REPS"); do            # rep outer → each sweep is a compl
   for t in $TRANSPORTS; do
     for s in $SCENARIOS; do
       n=$((n+1))
+      # Resumable: skip a cell that already has a dataset, so the matrix can be stopped
+      # (reboot / Ctrl-C / VM off) and resumed by re-running the same command — it picks up
+      # where it left off instead of redoing finished runs.
+      done_rd=$(ls -dt results/${GAME}_${t}_${s}_r${rep}_* 2>/dev/null | head -1)
+      if [ -n "$done_rd" ] && [ -s "$done_rd/dataset/video_frames.csv" ]; then
+        ok=$((ok+1)); echo "=== [$n/$total] $t $s rep$rep | SKIP (done: $(basename "$done_rd")) ===" | tee -a "$LOG"
+        continue
+      fi
       free=$(df -m / | awk 'NR==2{print $4}')
       if [ "$free" -lt "$MINFREE_MB" ]; then
         echo "[matrix] ABORT at $n/$total: disk ${free}MB < ${MINFREE_MB}MB (gzip/offload the RoQ+QUIC pcaps, then resume with a higher starting rep)" | tee -a "$LOG"
